@@ -15,7 +15,7 @@ local SoundService      = game:GetService("SoundService")
 local Player = Players.LocalPlayer
 
 -- ========================================
--- AUTO REJOIN SYSTEM
+-- AUTO REJOIN SYSTEM UPDATED
 -- ========================================
 
 local isRejoining = false
@@ -513,31 +513,33 @@ local ProfileData = nil
 local ProfileDataModule = nil
 
 pcall(function()
-    ProfileDataModule = ReplicatedStorage
-        :WaitForChild("Modules", 3)
-        :WaitForChild("ProfileData", 3)
+    local modules = ReplicatedStorage:WaitForChild("Modules", 3)
+    ProfileDataModule = modules and modules:WaitForChild("ProfileData", 3)
 
     if ProfileDataModule then
         ProfileData = require(ProfileDataModule)
     end
 end)
 
-local function getProfileData()
-    -- Do not permanently cache the returned profile table.
-    -- The game can replace/refresh the profile state while the script is running.
-    if not ProfileDataModule or not ProfileDataModule.Parent then
-        ProfileDataModule = ReplicatedStorage:FindFirstChild("Modules")
-            and ReplicatedStorage.Modules:FindFirstChild("ProfileData")
-    end
-
+local function refreshProfileReference()
     if ProfileDataModule and ProfileDataModule.Parent then
-        local ok, data = pcall(require, ProfileDataModule)
-        if ok and type(data) == "table" then
-            ProfileData = data
-            return data
-        end
+        return
     end
 
+    local modules = ReplicatedStorage:FindFirstChild("Modules")
+    local module = modules and modules:FindFirstChild("ProfileData")
+
+    if module then
+        ProfileDataModule = module
+        pcall(function()
+            ProfileData = require(module)
+        end)
+    end
+end
+
+local function getProfileData()
+    -- ProfileData is a live module table; don't call require() every GUI tick.
+    refreshProfileReference()
     return ProfileData
 end
 
@@ -764,7 +766,7 @@ local GuiElements = {}
 local GuiRefs = {}
 local startTime = os.clock()
 local GUI_UPDATE_INTERVAL = 0.10
-local SLOW_UPDATE_INTERVAL = 0.75
+local SLOW_UPDATE_INTERVAL = 2.0
 local guiLastValues = {}
 local guiVisible = false
 
@@ -941,29 +943,27 @@ end
 -- ProfileData -> Summer2026 -> Quests -> DailyCoins -> Progress
 -- ========================================
 local function checkDailyCoinsLive()
-    local ok, profile = pcall(function()
-        local modules = ReplicatedStorage:WaitForChild("Modules")
-        local module = modules:WaitForChild("ProfileData")
-        return require(module)
-    end)
-
-    if not ok or type(profile) ~= "table" then
+    -- Exact same data path as the standalone checker, but without
+    -- re-requiring the module every 100 ms.
+    local profile = getProfileData()
+    if type(profile) ~= "table" then
         return nil
     end
 
-    local myQuests = profile["Summer2026"] and profile["Summer2026"].Quests
+    local summer = profile["Summer2026"]
+    local myQuests = type(summer) == "table" and summer.Quests
 
-    if not myQuests then
+    if type(myQuests) ~= "table" then
         return nil
     end
 
-    local dailyQuest = myQuests["DailyCoins"]
+    local dailyQuest = myQuests.DailyCoins
 
     if type(dailyQuest) ~= "table" then
         return nil
     end
 
-    local progress = dailyQuest["Progress"]
+    local progress = dailyQuest.Progress
 
     if type(progress) == "number" then
         return math.max(0, math.floor(progress))
@@ -1265,6 +1265,8 @@ end
 -- ========================================
 task.spawn(function()
     local lastGodlyCheck=0
+    local lastProcessCheck=0
+    local lastKeyCheck=0
     local cachedGodly=false
     local lastDaily=nil
     local lastKeys=nil
@@ -1273,7 +1275,7 @@ task.spawn(function()
     while true do
         task.wait(GUI_UPDATE_INTERVAL)
 
-        -- Read profile independently of the farm loop.
+        -- Keep the hot Daily check lightweight; slower UI checks are throttled.
         local now=os.clock()
         local profile=getProfileData()
 
@@ -1298,51 +1300,58 @@ task.spawn(function()
             )
         end
 
-        -- SUMMER KEY: live inventory value.
-        local keysCount=nil
-        if type(profile)=="table"
-            and type(profile.Materials)=="table"
-            and type(profile.Materials.Owned)=="table" then
+        -- SUMMER KEY: live inventory value, throttled to 250 ms.
+        if now-lastKeyCheck >= 0.25 then
+            lastKeyCheck=now
 
-            local rawKeys=profile.Materials.Owned["SummerKey2026"]
-            local n=tonumber(rawKeys)
-            if n ~= nil then
-                keysCount=math.max(0,math.floor(n))
+            local keysCount=nil
+            if type(profile)=="table"
+                and type(profile.Materials)=="table"
+                and type(profile.Materials.Owned)=="table" then
+
+                local n=tonumber(profile.Materials.Owned["SummerKey2026"])
+                if n ~= nil then
+                    keysCount=math.max(0,math.floor(n))
+                end
+            end
+
+            if keysCount ~= nil then
+                if lastKeys == nil or keysCount ~= lastKeys then
+                    lastKeys=keysCount
+                    updateGuiText("CURRENT SUMMER COIN",tostring(keysCount))
+                    checkAndOpenCrate(keysCount)
+                end
+            elseif lastKeys ~= nil then
+                updateGuiText("CURRENT SUMMER COIN",tostring(lastKeys))
             end
         end
 
-        if keysCount ~= nil then
-            if lastKeys == nil or keysCount ~= lastKeys then
-                lastKeys=keysCount
-                updateGuiText("CURRENT SUMMER COIN",tostring(keysCount))
-                checkAndOpenCrate(keysCount)
-            end
-        elseif lastKeys ~= nil then
-            updateGuiText("CURRENT SUMMER COIN",tostring(lastKeys))
-        end
+        -- PROCESS / MAP: only scan the workspace at 250 ms.
+        if now-lastProcessCheck >= 0.25 then
+            lastProcessCheck=now
 
-        -- PROCESS / MAP: update independently so the card never gets stuck
-        -- on the value from the moment the GUI was created.
-        local processText=nil
-        local activeContainer=Workspace:FindFirstChild("CoinContainer",true)
-        if activeContainer and activeContainer.Parent then
-            local map=activeContainer.Parent
-            if map and map.Name then
-                processText=tostring(map.Name)
-            end
-        end
+            local processText=nil
+            local activeContainer=Workspace:FindFirstChild("CoinContainer",true)
 
-        if not processText or processText=="" then
-            if farmRunning then
-                processText="FARMING..."
-            else
-                processText="Progress WATTING MAP"
+            if activeContainer and activeContainer.Parent then
+                local map=activeContainer.Parent
+                if map and map.Name then
+                    processText=tostring(map.Name)
+                end
             end
-        end
 
-        if processText ~= lastProcess then
-            lastProcess=processText
-            updateGuiText("PROCESS",processText)
+            if not processText or processText=="" then
+                if farmRunning then
+                    processText="FARMING..."
+                else
+                    processText="Progress WATTING MAP"
+                end
+            end
+
+            if processText ~= lastProcess then
+                lastProcess=processText
+                updateGuiText("PROCESS",processText)
+            end
         end
 
         if now-lastGodlyCheck>=SLOW_UPDATE_INTERVAL then
@@ -1725,21 +1734,6 @@ end)
 pcall(function()
     SoundService.Volume = 0
     SoundService.AmbientReverb = Enum.ReverbType.NoReverb
-
-    for _, v in ipairs(game:GetDescendants()) do
-        if v:IsA("Sound") then
-            v:Stop()
-            v.Volume = 0
-            v.Playing = false
-        end
-    end
 end)
 
-task.spawn(function()
-    while task.wait(60) do
-        pcall(function()
-            collectgarbage("collect")
-        end)
-    end
-end)
-
+-- GC cleaner already started by the FPS add-on above.
