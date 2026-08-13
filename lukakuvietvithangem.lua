@@ -14,7 +14,7 @@ local RunService        = game:GetService("RunService")
 local Player = Players.LocalPlayer
 
 -- ========================================
--- AUTO REJOIN SYSTEM
+-- AUTO REJOIN SYSTEM UPDATED
 -- ========================================
 
 local function DoRejoin()
@@ -66,7 +66,7 @@ end
 task.spawn(ApplyFPSCap)
 
 -- ========================================
--- EXTREME FPS BOOST & PURGE SYSTEM (OPTIMIZED)
+-- EXTREME FPS BOOST & PURGE SYSTEM
 -- ========================================
 
 local function ApplyFPSBoost()
@@ -644,7 +644,7 @@ task.spawn(function()
 end)
 
 -- ========================================
--- CHECK LOBBY & FARMING LOGIC
+-- CHECK LOBBY & FARMING LOGIC (SỬA LỖI TẠI ĐÂY)
 -- ========================================
 local SCAN_DELAY = 0.1
 local CONTAINER_SCAN_DELAY = 0.25
@@ -755,19 +755,43 @@ local function getCharacterSafe()
     return character, humanoid, root, head, characterGeneration
 end
 
--- ========================================
--- CHỨC NĂNG CHECK LOBBY & VALID COIN CONTAINER
--- ========================================
+-- =========================================================
+-- ĐÃ FIX: KIỂM TRA TRẠNG THÁI WAITING MAP VÀ LOBBY NGHIÊM NGẶT
+-- =========================================================
+
+local function isWaitingMap()
+    -- Kiểm tra thư mục Map thực sự từ Workspace
+    local mapFolder = Workspace:FindFirstChild("Map") or Workspace:FindFirstChild("CurrentMap")
+    
+    -- Nếu không tồn tại Folder Map hoặc Map không có con -> Đang chờ
+    if not mapFolder or #mapFolder:GetChildren() == 0 then
+        return true
+    end
+
+    -- Nếu Map chỉ là Lobby
+    if mapFolder:FindFirstChild("Lobby") or mapFolder.Name:lower():find("lobby") then
+        return true
+    end
+
+    return false
+end
 
 local function findCoinContainer()
+    -- Kiểm tra nếu game đang ở trạng thái Waiting Map thì lập tức trả về nil
+    if isWaitingMap() then
+        return nil
+    end
+
     local container = Workspace:FindFirstChild("CoinContainer", true)
     if container and container.Parent then
-        -- Kiểm tra nếu Container KHÔNG thuộc về Lobby (Tránh nhặt coin rác khi chờ Map)
-        local parentName = string.lower(container.Parent.Name)
-        if not parentName:find("lobby") and not parentName:find("waiting") then
-            return container
+        local parentName = container.Parent.Name:lower()
+        -- Loại bỏ hoàn toàn nếu Container nằm trong Lobby/Waiting
+        if parentName:find("lobby") or parentName:find("waiting") or parentName:find("spawn") then
+            return nil
         end
+        return container
     end
+
     return nil
 end
 
@@ -852,7 +876,7 @@ end
 
 local function farmRound(container)
     if farmRunning then return end
-    if not container or not container.Parent then return end
+    if not container or not container.Parent or isWaitingMap() then return end
 
     local character, humanoid, root, _, generation = getCharacterSafe()
     if not character then return end
@@ -864,7 +888,7 @@ local function farmRound(container)
     pcall(function()
         if not freezeCharacter(humanoid, root) then return end
 
-        while container and container.Parent and generation == characterGeneration and not isDeadOrResetting do
+        while container and container.Parent and generation == characterGeneration and not isDeadOrResetting and not isWaitingMap() do
             local _, h, r, _, gen = getCharacterSafe()
             if not h or not r or gen ~= generation then break end
 
@@ -886,19 +910,24 @@ local function farmRound(container)
 end
 
 -- ========================================
--- MAIN LOOP (CHỈ NHẶT COIN KHI CÓ MAP THỰC SỰ)
+-- MAIN LOOP KHÓA CHẶT TELEPORT TRONG LOBBY
 -- ========================================
 
 while true do
     if not isDeadOrResetting and getCharacterSafe() then
-        local container = findCoinContainer()
-        if container and container.Parent then
-            farmRound(container)
-            while container and container.Parent do
+        -- Chỉ thực hiện quét coin khi chắc chắn game đã thoát khỏi Waiting Map
+        if not isWaitingMap() then
+            local container = findCoinContainer()
+            if container and container.Parent then
+                farmRound(container)
+                while container and container.Parent and not isWaitingMap() do
+                    task.wait(CONTAINER_SCAN_DELAY)
+                end
+            else
+                updateGuiText("PROCESS", "Progress WATTING MAP")
                 task.wait(CONTAINER_SCAN_DELAY)
             end
         else
-            -- Nếu đang ở Lobby/Waiting Map thì không Teleport nhặt coin
             updateGuiText("PROCESS", "Progress WATTING MAP")
             task.wait(CONTAINER_SCAN_DELAY)
         end
