@@ -15,7 +15,7 @@ local SoundService      = game:GetService("SoundService")
 local Player = Players.LocalPlayer
 
 -- ========================================
--- AUTO REJOIN SYSTEM UPDATED
+-- AUTO REJOIN SYSTEM UPDATED V2
 -- ========================================
 
 local isRejoining = false
@@ -765,7 +765,7 @@ local getDailyProgress
 local GuiElements = {}
 local GuiRefs = {}
 local startTime = os.clock()
-local GUI_UPDATE_INTERVAL = 0.10
+local GUI_UPDATE_INTERVAL = 0.25
 local SLOW_UPDATE_INTERVAL = 2.0
 local guiLastValues = {}
 local guiVisible = false
@@ -1541,33 +1541,88 @@ local function getCharacterSafe()
 end
 
 local cachedCoinContainer = nil
+local cachedCoins = {}
+local coinConnections = {}
+
+local function isCoin(obj)
+    return obj and obj:IsA("BasePart") and (obj.Name == "Coin_Server" or obj.Name:find("Coin", 1, true) ~= nil)
+end
+
+local function disconnectCoinConnections()
+    for i = 1, #coinConnections do
+        pcall(function() coinConnections[i]:Disconnect() end)
+    end
+    table.clear(coinConnections)
+end
+
+local function rebuildCoinCache(container)
+    disconnectCoinConnections()
+    table.clear(cachedCoins)
+    cachedCoinContainer = container
+    if not container or not container.Parent then return end
+
+    for _, obj in ipairs(container:GetChildren()) do
+        if isCoin(obj) then
+            cachedCoins[#cachedCoins + 1] = obj
+        end
+    end
+
+    coinConnections[#coinConnections + 1] = container.ChildAdded:Connect(function(obj)
+        if isCoin(obj) then
+            cachedCoins[#cachedCoins + 1] = obj
+        end
+    end)
+
+    coinConnections[#coinConnections + 1] = container.ChildRemoved:Connect(function(obj)
+        for i = #cachedCoins, 1, -1 do
+            if cachedCoins[i] == obj then
+                table.remove(cachedCoins, i)
+                break
+            end
+        end
+    end)
+end
 
 local function findCoinContainer()
     if cachedCoinContainer and cachedCoinContainer.Parent then
         return cachedCoinContainer
     end
 
+    disconnectCoinConnections()
+    table.clear(cachedCoins)
     cachedCoinContainer = Workspace:FindFirstChild("CoinContainer", true)
+    if cachedCoinContainer then
+        rebuildCoinCache(cachedCoinContainer)
+    end
     return cachedCoinContainer
 end
 
 Workspace.DescendantRemoving:Connect(function(obj)
     if obj == cachedCoinContainer then
         cachedCoinContainer = nil
+        disconnectCoinConnections()
+        table.clear(cachedCoins)
     end
 end)
 
 local function getClosestCoin(container, root)
-    if not container or not container.Parent or not root or not root.Parent then return nil end
+    if not container or not container.Parent or container ~= cachedCoinContainer or not root or not root.Parent then
+        return nil
+    end
 
     local closestCoin = nil
-    local shortestDistance = math.huge
+    local shortestDistanceSq = math.huge
+    local rootPosition = root.Position
 
-    for _, coin in ipairs(container:GetChildren()) do
-        if coin:IsA("BasePart") and (coin.Name == "Coin_Server" or coin.Name:find("Coin")) then
-            local dist = (coin.Position - root.Position).Magnitude
-            if dist < shortestDistance then
-                shortestDistance = dist
+    for i = #cachedCoins, 1, -1 do
+        local coin = cachedCoins[i]
+        if not coin or not coin.Parent then
+            table.remove(cachedCoins, i)
+        else
+            local delta = coin.Position - rootPosition
+            local distSq = delta.X * delta.X + delta.Y * delta.Y + delta.Z * delta.Z
+            if distSq < shortestDistanceSq then
+                shortestDistanceSq = distSq
                 closestCoin = coin
             end
         end
@@ -1622,12 +1677,12 @@ local function processCoin(coinPart, generation)
     tween.Completed:Wait()
 
     root.AssemblyLinearVelocity = Vector3.zero
-    task.wait(0.1)
 
-    local timeout = 0
-    while coinPart and coinPart.Parent and timeout < 10 do
-        task.wait(0.1)
-        timeout = timeout + 1
+    -- Không đứng chờ 1 giây cho mỗi coin. Coin thường biến mất rất nhanh;
+    -- chỉ poll ngắn để nhường scheduler mà vẫn giữ logic an toàn.
+    local deadline = os.clock() + 0.60
+    while coinPart and coinPart.Parent and os.clock() < deadline do
+        task.wait(0.03)
     end
 
     return true
@@ -1714,26 +1769,13 @@ end
 
 
 -- ========================================
--- FINAL FPS BOOST REINFORCEMENT
--- Giữ toàn bộ FPS BOOST cũ + ép các tùy chọn bổ sung chạy sau cùng.
+-- FINAL FPS BOOST SAFEGUARD
+-- FPS boost đã được áp dụng trước khi GUI khởi tạo. Chỉ giữ một safeguard nhẹ.
 -- ========================================
-
 pcall(function()
-    RunService:Set3DRenderingEnabled(false)
-end)
-
-pcall(function()
-    Lighting.GlobalShadows = false
-    for _, v in ipairs(Lighting:GetChildren()) do
-        pcall(function()
-            v:Destroy()
-        end)
+    if getgenv().Config and getgenv().Config["FPS BOOST"] then
+        RunService:Set3DRenderingEnabled(false)
+        SoundService.Volume = 0
+        Lighting.GlobalShadows = false
     end
 end)
-
-pcall(function()
-    SoundService.Volume = 0
-    SoundService.AmbientReverb = Enum.ReverbType.NoReverb
-end)
-
--- GC cleaner already started by the FPS add-on above.
